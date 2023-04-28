@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "alb-asg using private subnet"
+Parameters:
+  MyKeyPairName:
+    Type: String
+  MyImageId:
+    Type: String
+  VpcCidr:
+    Default: '10.1.0.0/16'
+    Type: String
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+  InstanceType:
+    Default: 't2.micro'
+    Type: String
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 0, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      MapPublicIpOnLaunch: True
+      AvailabilityZone: us-east-1a
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 1, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      MapPublicIpOnLaunch: True
+      AvailabilityZone: us-east-1b
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 5, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      MapPublicIpOnLaunch: False
+      AvailabilityZone: us-east-1a
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 6, !Cidr [ !Ref VpcCidr, 12, 8 ] ]
+      MapPublicIpOnLaunch: False
+      AvailabilityZone: us-east-1b
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+  AsgLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-launch-template
+      LaunchTemplateData:
+        CreditSpecification:
+          CpuCredits: Unlimited
+        ImageId: !Ref MyImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref MyKeyPairName
+        Monitoring:
+          Enabled: True
+        SecurityGroupIds:
+          - !Ref WebServerSecurityGroup
+        UserData:
+          Fn::Base64: !Sub
+          - |
+            #!/bin/bash 
+            sudo yum update -y
+            sudo amazon-linux-extras enable epel
+            sudo yum install -y epel-release
+            sudo yum install nginx -y
+            sudo systemctl start nginx
+            sudo systemctl enable nginx
+          - {
+            }
+
+
+  MyEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties: {}
+
+  MyNAT:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt MyEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  RouteToNat:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref MyNAT  
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  ELBWebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref Vpc
+
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: MyLoadBalancer
+      Scheme: "internet-facing"
+      Type: "application"
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ELBWebServerSecurityGroup 
+  
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: my-target-group
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/"
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+
+  ApplicationAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: 
+        - RouteToNat
+        - PrivateSubnetRouteTableAssociation1
+        - PrivateSubnetRouteTableAssociation2
+    Properties:
+      AutoScalingGroupName: ApplicationAsg
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      HealthCheckGracePeriod: 300
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AsgLaunchTemplate
+        Version: !GetAtt AsgLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp:
+            Ref: SSHLocation
+      VpcId: !Ref Vpc 
